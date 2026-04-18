@@ -1,0 +1,5 @@
+node_modules
+.dist
+/dist
+.vscode
+public/data/solar-city-permits.csv
