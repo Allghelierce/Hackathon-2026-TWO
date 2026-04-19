@@ -502,7 +502,7 @@ function App() {
           </ResponsiveContainer>
         </ChartCard>
 
-        <ChartCard title="Permit type throughput" subtitle="Most common permit categories and their average cycle times.">
+        <ChartCard title="Permit type throughout" subtitle="Most common permit categories and their average cycle times.">
           <ResponsiveContainer width="100%" height={260}>
             <BarChart data={typeData} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
               <XAxis dataKey="type" tick={{ fill: '#c6d1ff', fontSize: 11 }} axisLine={false} tickLine={false} interval={0} angle={-18} textAnchor="end" height={58} />
