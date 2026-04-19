@@ -219,7 +219,7 @@ function App() {
 
   const model = useMemo(() => trainModel(trainingRecords), [trainingRecords]);
   const propertyTypes = useMemo(() => uniqueValues(records, 'propertyType'), [records]);
-  const jurisdictions = useMemo(() => uniqueValues(records, 'jurisdiction'), [records]);
+  const jurisdictions = useMemo(() => uniqueValues(records.filter(r => r.state === 'CA'), 'jurisdiction'), [records]);
   const predResult = useMemo(() => {
     if (!model || !predInput.county || !predInput.type) return null;
     return predict(model, predInput);

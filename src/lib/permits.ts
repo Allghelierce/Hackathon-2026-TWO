@@ -390,6 +390,7 @@ export const countyPerformance = (records: PermitRecord[]) => {
   const buckets = new Map<string, { permits: number; totalDuration: number; passed: number; passRates: number[] }>();
 
   for (const record of records) {
+    if (record.county === 'Unknown county') continue;
     const bucket = buckets.get(record.county) ?? { permits: 0, totalDuration: 0, passed: 0, passRates: [] };
     bucket.permits += 1;
     bucket.totalDuration += record.totalDuration ?? 0;
@@ -417,7 +418,6 @@ export const countyPerformance = (records: PermitRecord[]) => {
 
 export const buildMetrics = (records: PermitRecord[]): DashboardMetric[] => {
   const total = records.length;
-  const averageDuration = average(records.map((record) => record.totalDuration));
   const medianDuration = median(records.map((record) => record.totalDuration));
   const passRate = average(records.map((record) => record.inspectionPassRate));
   const activeCounties = new Set(records.map((record) => record.county)).size;
