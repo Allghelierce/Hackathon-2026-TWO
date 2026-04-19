@@ -33,7 +33,6 @@ export interface PermitRecord {
   yearBuilt: number | null;
   lotSize: number | null;
   buildingArea: number | null;
-  titanCityInstalls: number;
 }
 
 export interface PermitFilters {
@@ -72,7 +71,7 @@ export const loadRowsFromUrl = async (url: string): Promise<CsvRow[]> => {
 export const loadRowsFromFile = async (file: File): Promise<CsvRow[]> =>
   parseCsvText(await file.text());
 
-export const parseExternalRecords = (rows: CsvRow[], titanCityIndex: Map<string, number> = new Map()): PermitRecord[] =>
+export const parseExternalRecords = (rows: CsvRow[]): PermitRecord[] =>
   rows
     .map((row, index) => {
       const applyDate = row.apply_date ? new Date(row.apply_date) : null;
@@ -120,21 +119,11 @@ export const parseExternalRecords = (rows: CsvRow[], titanCityIndex: Map<string,
         yearBuilt: null,
         lotSize: null,
         buildingArea: null,
-        titanCityInstalls: titanCityIndex.get(city.toLowerCase()) ?? 0,
       };
     })
     .filter(r => r.totalDuration !== null) as PermitRecord[];
 
-export const buildTitanCityIndex = (titanRows: CsvRow[]): Map<string, number> => {
-  const counts = new Map<string, number>();
-  for (const row of titanRows) {
-    const city = text(row, 'CITY').toLowerCase();
-    if (city) counts.set(city, (counts.get(city) ?? 0) + 1);
-  }
-  return counts;
-};
-
-export const toPermitRecords = (rows: CsvRow[], titanCityIndex: Map<string, number> = new Map()): PermitRecord[] =>
+export const toPermitRecords = (rows: CsvRow[]): PermitRecord[] =>
   rows.map((row, index) => {
     const permitNumber = text(row, 'PERMIT_NUMBER');
     const id = text(row, 'ID') || permitNumber || `permit-${index + 1}`;
@@ -170,7 +159,6 @@ export const toPermitRecords = (rows: CsvRow[], titanCityIndex: Map<string, numb
       yearBuilt: number(row, 'PROPERTY_YEAR_BUILT'),
       lotSize: number(row, 'PROPERTY_LOT_SIZE'),
       buildingArea: number(row, 'PROPERTY_BUILDING_AREA'),
-      titanCityInstalls: titanCityIndex.get(city.toLowerCase()) ?? 0,
     };
   });
 
@@ -368,23 +356,6 @@ export const typeBreakdown = (records: PermitRecord[]) => {
     .slice(0, 8);
 };
 
-export const titanCityPerformance = (records: PermitRecord[]) => {
-  const seen = new Map<string, { titanInstalls: number; durations: number[] }>();
-  for (const r of records) {
-    if (r.titanCityInstalls <= 0) continue;
-    const entry = seen.get(r.city) ?? { titanInstalls: r.titanCityInstalls, durations: [] };
-    if (r.totalDuration !== null && r.totalDuration > 0) entry.durations.push(r.totalDuration);
-    seen.set(r.city, entry);
-  }
-  return Array.from(seen.entries())
-    .map(([city, { titanInstalls, durations }]) => ({
-      city,
-      titanInstalls,
-      avgDuration: durations.length ? Math.round(durations.reduce((s, v) => s + v, 0) / durations.length) : null,
-    }))
-    .sort((a, b) => b.titanInstalls - a.titanInstalls)
-    .slice(0, 8);
-};
 
 export const countyPerformance = (records: PermitRecord[]) => {
   const buckets = new Map<string, { permits: number; totalDuration: number; passed: number; passRates: number[] }>();

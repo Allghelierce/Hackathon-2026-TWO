@@ -2,15 +2,12 @@ import { useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import L from 'leaflet';
 import { CircleAlert, MapPinned, Sparkles, TrendingUp, Waves } from 'lucide-react';
-import { featureImportances, predict, trainModel, type PredictionInput } from './lib/prediction';
 import { CircleMarker, GeoJSON as GeoJSONLayer, MapContainer, Popup, TileLayer, useMap } from 'react-leaflet';
 import {
   Area,
   AreaChart,
   Bar,
   BarChart,
-  ComposedChart,
-  Line,
   Pie,
   PieChart,
   ResponsiveContainer,
@@ -21,7 +18,6 @@ import {
 import {
   applyPermitFilters,
   buildMetrics,
-  buildTitanCityIndex,
   countyPerformance,
   formatCurrency,
   formatNumber,
@@ -29,7 +25,6 @@ import {
   loadRowsFromUrl,
   parseExternalRecords,
   statusBreakdown,
-  titanCityPerformance,
   topInsight,
   toPermitRecords,
   trendByMonth,
@@ -40,19 +35,8 @@ import {
 } from './lib/permits';
 
 const DEFAULT_DATA_URL = '/data/solar-city-permits.csv';
-const TITAN_DATA_URL = '/data/titan-addresses.csv';
 const RECORDS_DATA_URL = '/data/records.csv';
 
-const PERMIT_TYPE_OPTIONS: Array<{ label: string; rawType: string }> = [
-  { label: 'Solar Panels / PV', rawType: 'Solar panels' },
-  { label: 'Building / Construction', rawType: 'Building' },
-  { label: 'Electrical', rawType: 'Electrical' },
-  { label: 'Mechanical / HVAC', rawType: 'Mechanical' },
-  { label: 'Alternate Energy', rawType: 'Alternate energy' },
-  { label: 'Photovoltaic', rawType: 'Photovoltaic' },
-  { label: 'Multi-trade (MEP)', rawType: 'Mep' },
-  { label: 'Miscellaneous', rawType: 'Miscellaneous' },
-];
 
 const statusColors: Record<string, string> = {
   final: '#58d68d',
@@ -115,7 +99,6 @@ function ChartCard({ title, subtitle, children }: { title: string; subtitle: str
 
 function App() {
   const [records, setRecords] = useState<PermitRecord[]>([]);
-  const [trainingRecords, setTrainingRecords] = useState<PermitRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [filters, setFilters] = useState<PermitFilters>({
     search: '',
@@ -124,36 +107,24 @@ function App() {
     type: 'all',
   });
   const [selectedPermitId, setSelectedPermitId] = useState<string | null>(null);
-  const [predInput, setPredInput] = useState<PredictionInput>({
-    county: '',
-    type: '',
-    propertyType: '',
-    jobValue: null,
-    fees: null,
-
-    jurisdiction: '',
-  });
+  const [estimInput, setEstimInput] = useState({ county: '', type: '' });
 
   useEffect(() => {
     let active = true;
 
     const bootstrap = async () => {
       try {
-        const [permitRows, titanRows, externalRows] = await Promise.all([
+        const [permitRows, externalRows] = await Promise.all([
           loadRowsFromUrl(DEFAULT_DATA_URL),
-          loadRowsFromUrl(TITAN_DATA_URL).catch(() => []),
           loadRowsFromUrl(RECORDS_DATA_URL).catch(() => []),
         ]);
-        const titanCityIndex = buildTitanCityIndex(titanRows);
-        const mainRecords = toPermitRecords(permitRows, titanCityIndex);
-        const externalRecords = parseExternalRecords(externalRows, titanCityIndex);
+        const mainRecords = toPermitRecords(permitRows);
+        const externalRecords = parseExternalRecords(externalRows);
         if (!active) {
           return;
         }
         const allRecords = [...mainRecords, ...externalRecords];
         setRecords(allRecords);
-        setTrainingRecords(allRecords);
-        setSelectedPermitId(mainRecords[0]?.id ?? null);
         setError(null);
       } catch (failure) {
         if (!active) {
@@ -200,11 +171,18 @@ function App() {
   }, [filteredRecords, selectedPermitId]);
 
   const selectedPermit = useMemo(
-    () => filteredRecords.find((record) => record.id === selectedPermitId) ?? filteredRecords[0] ?? null,
+    () => filteredRecords.find((record) => record.id === selectedPermitId) ?? null,
     [filteredRecords, selectedPermitId],
   );
 
-  const metrics = useMemo(() => buildMetrics(filteredRecords), [filteredRecords]);
+  const metrics = useMemo(() => {
+    const base = buildMetrics(filteredRecords);
+    const activeCounty = filters.county !== 'all' ? filters.county : null;
+    if (activeCounty) {
+      base[0] = { ...base[0], label: `Permits in ${activeCounty}` };
+    }
+    return base;
+  }, [filteredRecords, filters.county]);
   const trend = useMemo(() => trendByMonth(filteredRecords), [filteredRecords]);
   const statusData = useMemo(
     () => statusBreakdown(filteredRecords).map((entry) => ({
@@ -217,27 +195,34 @@ function App() {
   const countyData = useMemo(() => countyPerformance(filteredRecords), [filteredRecords]);
   const insight = useMemo(() => topInsight(filteredRecords), [filteredRecords]);
 
-  const model = useMemo(() => trainModel(trainingRecords), [trainingRecords]);
-  const propertyTypes = useMemo(() => uniqueValues(records, 'propertyType'), [records]);
-  const jurisdictions = useMemo(() => uniqueValues(records.filter(r => r.state === 'CA'), 'jurisdiction'), [records]);
-  const predResult = useMemo(() => {
-    if (!model || !predInput.county || !predInput.type) return null;
-    return predict(model, predInput);
-  }, [model, predInput]);
-  const importances = useMemo(() => (model ? featureImportances(model) : []), [model]);
-  const titanCityData = useMemo(() => titanCityPerformance(records), [records]);
+  const estimResult = useMemo(() => {
+    let pool = records.filter(r => r.totalDuration !== null && (r.totalDuration as number) > 0 && Number.isFinite(r.totalDuration as number));
+    if (estimInput.county) pool = pool.filter(r => r.county.toLowerCase() === estimInput.county.toLowerCase());
+    if (estimInput.type) pool = pool.filter(r => r.type === estimInput.type);
+    if (pool.length < 3) return null;
+    const durations = pool.map(r => r.totalDuration as number).sort((a, b) => a - b);
+    const n = durations.length;
+    const median = n % 2 === 0 ? (durations[n / 2 - 1] + durations[n / 2]) / 2 : durations[Math.floor(n / 2)];
+    const mean = durations.reduce((s, v) => s + v, 0) / n;
+    const p25 = durations[Math.floor(n * 0.25)];
+    const p75 = durations[Math.floor(n * 0.75)];
+    const fast = pool.filter(r => (r.totalDuration as number) < 30).length;
+    const moderate = pool.filter(r => (r.totalDuration as number) >= 30 && (r.totalDuration as number) < 90).length;
+    const slow = pool.filter(r => (r.totalDuration as number) >= 90).length;
+    return { count: n, median: Math.round(median), mean: Math.round(mean), p25: Math.round(p25), p75: Math.round(p75), fast, moderate, slow };
+  }, [records, estimInput]);
 
 
   const coordinates = filteredRecords.filter((record) => record.lat != null && record.lng != null).slice(0, 1500);
 
   const countyFeature = useMemo(() => {
-    const county = predInput.county || (filters.county !== 'all' ? filters.county : '');
+    const county = estimInput.county || (filters.county !== 'all' ? filters.county : '');
     if (!county || !countiesGeoJson) return null;
     const match = countiesGeoJson.features.find(
       (f: any) => f.properties?.NAME?.toUpperCase() === county.toUpperCase()
     );
     return match ?? null;
-  }, [predInput.county, filters.county, countiesGeoJson]);
+  }, [estimInput.county, filters.county, countiesGeoJson]);
 
   const kpiCopy = [
     {
@@ -411,8 +396,8 @@ function App() {
         <aside className="glass-panel detail-panel">
           <div className="section-heading compact">
             <div>
-              <h3>Selected permit</h3>
-              <p>Drill into one permit without leaving the dashboard.</p>
+              <h3>Explore permit <span style={{ color: 'var(--accent)' }}>{selectedPermit ? (selectedPermit.permitNumber || selectedPermit.id) : formatNumber.format(filteredRecords.length)}</span></h3>
+              <p>{selectedPermit ? 'Viewing selected permit details.' : 'Click any point on the map to drill into a permit.'}</p>
             </div>
           </div>
           {selectedPermit ? (
@@ -454,7 +439,7 @@ function App() {
               </dl>
             </div>
           ) : (
-            <div className="empty-state">No permit matches the current filters.</div>
+            <div className="empty-state">No permit selected.</div>
           )}
         </aside>
       </section>
@@ -560,161 +545,88 @@ function App() {
           </div>
         </ChartCard>
 
-        <ChartCard
-          title="Titan Solar city presence"
-          subtitle="Top cities by Titan installations — bars show install count, line shows avg permit duration for matched cities."
-        >
-          {titanCityData.length > 0 ? (
-            <ResponsiveContainer width="100%" height={260}>
-              <ComposedChart data={titanCityData} margin={{ top: 10, right: 28, left: 0, bottom: 0 }}>
-                <XAxis dataKey="city" tick={{ fill: '#c6d1ff', fontSize: 11 }} axisLine={false} tickLine={false} angle={-18} textAnchor="end" height={58} />
-                <YAxis yAxisId="installs" tick={{ fill: '#c6d1ff', fontSize: 12 }} axisLine={false} tickLine={false} />
-                <YAxis yAxisId="duration" orientation="right" tick={{ fill: '#f5c242', fontSize: 12 }} axisLine={false} tickLine={false} unit="d" />
-                <RechartsTooltip
-                  contentStyle={{ background: 'rgba(6,15,31,0.96)', border: '1px solid rgba(132,160,255,0.24)', borderRadius: '16px', color: '#f5f7ff' }}
-                  formatter={(value, name) => name === 'avgDuration' ? [`${value}d`, 'Avg duration'] : [value, 'Titan installs']}
-                />
-                <Bar yAxisId="installs" dataKey="titanInstalls" fill="#9a8cff" radius={[10, 10, 0, 0]} name="titanInstalls" />
-                <Line yAxisId="duration" type="monotone" dataKey="avgDuration" stroke="#f5c242" strokeWidth={2.5} dot={{ fill: '#f5c242', r: 4 }} name="avgDuration" connectNulls />
-              </ComposedChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="pred-empty">No city overlap found between Titan addresses and permit records.</div>
-          )}
-        </ChartCard>
       </section>
-      {model && (
-        <section className="glass-panel prediction-section">
+      <section className="glass-panel prediction-section">
           <div className="section-heading">
             <div>
               <h3 className="pred-heading">
                 <TrendingUp size={18} className="pred-heading-icon" />
-                Approval Time Predictor
+                Approval Time Estimator
               </h3>
-              <p>
-                Linear regression trained on {model.trainingSamples.toLocaleString()} historical permits — select
-                inputs to estimate total duration.
-              </p>
+              <p>Historical permit data — filter by county and type to see how long approvals typically take.</p>
             </div>
-            <div className="pred-badge-row">
-              <span className="pred-badge" data-tooltip="How much of the variance in approval time the model explains. 0.70 means it explains 70% of the variation — above 0.5 is decent for noisy permit data.">R² {model.r2.toFixed(2)}</span>
-              <span className="pred-badge" data-tooltip="Average prediction error in days on held-out permits the model has never seen. Smaller is better.">±{Math.round(model.rmse)} day RMSE</span>
-              <span className="pred-badge" data-tooltip="Number of historical permits used to train the model. More samples means more reliable predictions.">{model.trainingSamples.toLocaleString()} train samples</span>
-            </div>
+            {estimResult && (
+              <div className="pred-badge-row">
+                <span className="pred-badge">{estimResult.count.toLocaleString()} permits</span>
+                <span className="pred-badge">median {estimResult.median}d</span>
+                <span className="pred-badge">avg {estimResult.mean}d</span>
+              </div>
+            )}
           </div>
 
           <div className="prediction-grid">
             <div className="pred-form">
               <label className="pred-label">
-                County
+                County — optional
                 <input
-                  list="county-options"
-                  placeholder="County"
-                  value={predInput.county}
-                  onChange={(e) => setPredInput((p) => ({ ...p, county: e.target.value }))}
+                  list="estim-county-options"
+                  placeholder="All counties"
+                  value={estimInput.county}
+                  onChange={(e) => setEstimInput((p) => ({ ...p, county: e.target.value }))}
                 />
-                <datalist id="county-options">
-                  {filterOptions.counties.map((c) => (
-                    <option key={c} value={c} />
-                  ))}
+                <datalist id="estim-county-options">
+                  {filterOptions.counties.map((c) => <option key={c} value={c} />)}
                 </datalist>
               </label>
               <label className="pred-label">
-                Jurisdiction — optional
-                <input
-                  list="jurisdiction-options"
-                  placeholder="Search jurisdiction…"
-                  value={predInput.jurisdiction ?? ''}
-                  onChange={(e) => setPredInput((p) => ({ ...p, jurisdiction: e.target.value }))}
-                />
-                <datalist id="jurisdiction-options">
-                  {jurisdictions.map((j) => (
-                    <option key={j} value={j} />
-                  ))}
-                </datalist>
-              </label>
-              <label className="pred-label">
-                Permit type
-                <select value={predInput.type} onChange={(e) => setPredInput((p) => ({ ...p, type: e.target.value }))}>
-                  <option value="">Select type…</option>
-                  {PERMIT_TYPE_OPTIONS.map(({ label, rawType }) => (
-                    <option key={rawType} value={rawType}>{label}</option>
-                  ))}
+                Permit type — optional
+                <select value={estimInput.type} onChange={(e) => setEstimInput((p) => ({ ...p, type: e.target.value }))}>
+                  <option value="">All types</option>
+                  {filterOptions.types.map((t) => <option key={t} value={t}>{t}</option>)}
                 </select>
-              </label>
-              <label className="pred-label">
-                Property type
-                <select value={predInput.propertyType} onChange={(e) => setPredInput((p) => ({ ...p, propertyType: e.target.value }))}>
-                  <option value="">Select property type…</option>
-                  {propertyTypes.map((pt) => (
-                    <option key={pt} value={pt}>{pt}</option>
-                  ))}
-                </select>
-              </label>
-              <label className="pred-label">
-                Job value — optional
-                <input
-                  type="number"
-                  placeholder="e.g. 25000"
-                  value={predInput.jobValue ?? ''}
-                  onChange={(e) => setPredInput((p) => ({ ...p, jobValue: e.target.value ? Number(e.target.value) : null }))}
-                />
-              </label>
-              <label className="pred-label">
-                Permit fees — optional
-                <input
-                  type="number"
-                  placeholder="e.g. 500"
-                  value={predInput.fees ?? ''}
-                  onChange={(e) => setPredInput((p) => ({ ...p, fees: e.target.value ? Number(e.target.value) : null }))}
-                />
               </label>
             </div>
 
             <div className="pred-result">
-              {predResult ? (
+              {estimResult ? (
                 <>
                   <div className="pred-output">
-                    <div className="pred-label-sm">Estimated approval duration</div>
+                    <div className="pred-label-sm">Median approval duration</div>
                     <div
                       className="pred-days"
                       style={{
-                        color:
-                          predResult.predictedDays < 30
-                            ? 'var(--good)'
-                            : predResult.predictedDays < 60
-                              ? 'var(--warn)'
-                              : 'var(--bad)',
+                        color: estimResult.median < 30 ? 'var(--good)' : estimResult.median < 90 ? 'var(--warn)' : 'var(--bad)',
                       }}
                     >
-                      {predResult.predictedDays}
+                      {estimResult.median}
                       <span className="pred-unit">days</span>
                     </div>
-                    <div className="pred-range">
-                      {predResult.lowerBound}–{predResult.upperBound} day confidence range
-                    </div>
+                    <div className="pred-range">Middle 50% range: {estimResult.p25}–{estimResult.p75} days</div>
                   </div>
 
                   <div className="pred-importance">
-                    <div className="pred-label-sm pred-importance-heading">Feature influence</div>
-                    {importances.map((imp) => (
-                      <div key={imp.name} className="imp-row">
-                        <div className="imp-name">{imp.name}</div>
+                    <div className="pred-label-sm pred-importance-heading">Speed breakdown</div>
+                    {[
+                      { label: 'Fast  (< 30 days)', count: estimResult.fast, color: 'var(--good)' },
+                      { label: 'Moderate  (30–90 days)', count: estimResult.moderate, color: 'var(--warn)' },
+                      { label: 'Slow  (> 90 days)', count: estimResult.slow, color: 'var(--bad)' },
+                    ].map(({ label, count, color }) => (
+                      <div key={label} className="imp-row">
+                        <div className="imp-name">{label}</div>
                         <div className="imp-bar-bg">
-                          <div className="imp-bar-fill" style={{ width: `${Math.round(imp.pct * 100)}%` }} />
+                          <div className="imp-bar-fill" style={{ width: `${Math.round((count / estimResult.count) * 100)}%`, background: color }} />
                         </div>
-                        <div className="imp-pct">{Math.round(imp.pct * 100)}%</div>
+                        <div className="imp-pct">{Math.round((count / estimResult.count) * 100)}%</div>
                       </div>
                     ))}
                   </div>
                 </>
               ) : (
-                <div className="pred-empty">Select county and permit type to generate a prediction.</div>
+                <div className="pred-empty">Not enough data for this combination. Try broadening your filters.</div>
               )}
             </div>
           </div>
         </section>
-      )}
     </div>
   );
 }

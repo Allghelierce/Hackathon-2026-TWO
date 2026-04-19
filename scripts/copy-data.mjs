@@ -6,7 +6,6 @@ mkdirSync(outDir, { recursive: true });
 
 const files = [
   ['data/solar-city-permits.csv', 'public/data/solar-city-permits.csv'],
-  ['data/Titan All Addresses.csv', 'public/data/titan-addresses.csv'],
   ['data/records.csv', 'public/data/records.csv'],
 ];
 
