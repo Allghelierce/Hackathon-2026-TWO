@@ -9,7 +9,6 @@ export interface TrainedModel {
   propertyTypeEncoding: Map<string, number>;
   subtypeEncoding: Map<string, number>;
   jurisdictionEncoding: Map<string, number>;
-  stateEncoding: Map<string, number>;
   featureMeans: number[];
   featureStds: number[];
   r2: number;
@@ -24,9 +23,7 @@ export interface PredictionInput {
   propertyType: string;
   jobValue: number | null;
   fees: number | null;
-  subtype?: string;
   jurisdiction?: string;
-  state?: string;
 }
 
 export interface PredictionResult {
@@ -124,7 +121,6 @@ export function trainModel(records: PermitRecord[]): TrainedModel | null {
   const propertyTypeEncoding = buildEncoding(trainSet, r => r.propertyType);
   const subtypeEncoding = buildEncoding(trainSet, r => r.subtype);
   const jurisdictionEncoding = buildEncoding(trainSet, r => r.jurisdiction);
-  const stateEncoding = buildEncoding(trainSet, r => r.state);
 
   const encode = (r: PermitRecord): number[] => [
     countyEncoding.get(r.county) ?? globalMean,
@@ -135,7 +131,6 @@ export function trainModel(records: PermitRecord[]): TrainedModel | null {
     subtypeEncoding.get(r.subtype) ?? globalMean,
     r.issueDate ? r.issueDate.getMonth() + 1 : 6,
     jurisdictionEncoding.get(r.jurisdiction) ?? globalMean,
-    stateEncoding.get(r.state) ?? globalMean,
   ];
 
   const Xtrain = trainSet.map(encode);
@@ -159,14 +154,12 @@ export function trainModel(records: PermitRecord[]): TrainedModel | null {
       'Subtype avg duration',
       'Issue month',
       'Jurisdiction avg',
-      'State avg',
     ],
     countyEncoding,
     typeEncoding,
     propertyTypeEncoding,
     subtypeEncoding,
     jurisdictionEncoding,
-    stateEncoding,
     featureMeans,
     featureStds,
     r2: r2Score(ytest, yPred),
@@ -184,10 +177,9 @@ export function predict(model: TrainedModel, input: PredictionInput): Prediction
     model.propertyTypeEncoding.get(input.propertyType) ?? model.globalMean,
     (input.jobValue ?? 0) / 1000,
     input.fees ?? 0,
-    input.subtype ? (model.subtypeEncoding.get(input.subtype) ?? model.globalMean) : model.globalMean,
+    model.globalMean,
     currentMonth,
     input.jurisdiction ? (model.jurisdictionEncoding.get(input.jurisdiction) ?? model.globalMean) : model.globalMean,
-    input.state ? (model.stateEncoding.get(input.state) ?? model.globalMean) : model.globalMean,
   ];
   const norm = raw.map((v, i) => (v - model.featureMeans[i]) / model.featureStds[i]);
   const pred = Math.max(1, dot(norm, model.weights) + model.bias);

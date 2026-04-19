@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import L from 'leaflet';
 import { CircleAlert, MapPinned, Sparkles, TrendingUp, Waves } from 'lucide-react';
 import { featureImportances, predict, trainModel, type PredictionInput } from './lib/prediction';
-import { CircleMarker, MapContainer, Popup, TileLayer, useMap } from 'react-leaflet';
+import { CircleMarker, GeoJSON as GeoJSONLayer, MapContainer, Popup, TileLayer, useMap } from 'react-leaflet';
 import {
   Area,
   AreaChart,
@@ -27,6 +27,7 @@ import {
   formatNumber,
   getStatusTone,
   loadRowsFromUrl,
+  parseExternalRecords,
   statusBreakdown,
   titanCityPerformance,
   topInsight,
@@ -40,6 +41,7 @@ import {
 
 const DEFAULT_DATA_URL = '/data/solar-city-permits.csv';
 const TITAN_DATA_URL = '/data/titan-addresses.csv';
+const RECORDS_DATA_URL = '/data/records.csv';
 
 const PERMIT_TYPE_OPTIONS: Array<{ label: string; rawType: string }> = [
   { label: 'Solar Panels / PV', rawType: 'Solar panels' },
@@ -74,7 +76,7 @@ function FitBounds({ points }: { points: PermitRecord[] }) {
     }
 
     const bounds = L.latLngBounds(coordinates.map((point) => [point.lat as number, point.lng as number]));
-    map.fitBounds(bounds.pad(0.15), { animate: true });
+    map.fitBounds(bounds.pad(0.45), { animate: true });
   }, [map, points]);
 
   return null;
@@ -113,6 +115,7 @@ function ChartCard({ title, subtitle, children }: { title: string; subtitle: str
 
 function App() {
   const [records, setRecords] = useState<PermitRecord[]>([]);
+  const [trainingRecords, setTrainingRecords] = useState<PermitRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [filters, setFilters] = useState<PermitFilters>({
     search: '',
@@ -127,9 +130,8 @@ function App() {
     propertyType: '',
     jobValue: null,
     fees: null,
-    subtype: '',
+
     jurisdiction: '',
-    state: '',
   });
 
   useEffect(() => {
@@ -137,17 +139,21 @@ function App() {
 
     const bootstrap = async () => {
       try {
-        const [permitRows, titanRows] = await Promise.all([
+        const [permitRows, titanRows, externalRows] = await Promise.all([
           loadRowsFromUrl(DEFAULT_DATA_URL),
           loadRowsFromUrl(TITAN_DATA_URL).catch(() => []),
+          loadRowsFromUrl(RECORDS_DATA_URL).catch(() => []),
         ]);
         const titanCityIndex = buildTitanCityIndex(titanRows);
-        const nextRecords = toPermitRecords(permitRows, titanCityIndex);
+        const mainRecords = toPermitRecords(permitRows, titanCityIndex);
+        const externalRecords = parseExternalRecords(externalRows, titanCityIndex);
         if (!active) {
           return;
         }
-        setRecords(nextRecords);
-        setSelectedPermitId(nextRecords[0]?.id ?? null);
+        const allRecords = [...mainRecords, ...externalRecords];
+        setRecords(allRecords);
+        setTrainingRecords(allRecords);
+        setSelectedPermitId(mainRecords[0]?.id ?? null);
         setError(null);
       } catch (failure) {
         if (!active) {
@@ -162,6 +168,14 @@ function App() {
     return () => {
       active = false;
     };
+  }, []);
+
+  const [countiesGeoJson, setCountiesGeoJson] = useState<any>(null);
+  useEffect(() => {
+    fetch('https://raw.githubusercontent.com/plotly/datasets/master/geojson-counties-fips.json')
+      .then(r => r.json())
+      .then(setCountiesGeoJson)
+      .catch(() => {});
   }, []);
 
   const filterOptions = useMemo(() => {
@@ -203,11 +217,9 @@ function App() {
   const countyData = useMemo(() => countyPerformance(filteredRecords), [filteredRecords]);
   const insight = useMemo(() => topInsight(filteredRecords), [filteredRecords]);
 
-  const model = useMemo(() => trainModel(records), [records]);
+  const model = useMemo(() => trainModel(trainingRecords), [trainingRecords]);
   const propertyTypes = useMemo(() => uniqueValues(records, 'propertyType'), [records]);
-  const subtypes = useMemo(() => uniqueValues(records, 'subtype'), [records]);
   const jurisdictions = useMemo(() => uniqueValues(records, 'jurisdiction'), [records]);
-  const states = useMemo(() => uniqueValues(records, 'state'), [records]);
   const predResult = useMemo(() => {
     if (!model || !predInput.county || !predInput.type) return null;
     return predict(model, predInput);
@@ -216,7 +228,16 @@ function App() {
   const titanCityData = useMemo(() => titanCityPerformance(records), [records]);
 
 
-  const coordinates = filteredRecords.filter((record) => record.lat != null && record.lng != null);
+  const coordinates = filteredRecords.filter((record) => record.lat != null && record.lng != null).slice(0, 1500);
+
+  const countyFeature = useMemo(() => {
+    const county = predInput.county || (filters.county !== 'all' ? filters.county : '');
+    if (!county || !countiesGeoJson) return null;
+    const match = countiesGeoJson.features.find(
+      (f: any) => f.properties?.NAME?.toUpperCase() === county.toUpperCase()
+    );
+    return match ?? null;
+  }, [predInput.county, filters.county, countiesGeoJson]);
 
   const kpiCopy = [
     {
@@ -272,15 +293,18 @@ function App() {
       </motion.header>
 
       <section className="controls-row glass-panel controls-row--top">
-        <div className="filter-group">
+        <div className="filter-group filter-group--3">
           <label>
-            Search
+            County
             <input
-              type="search"
-              value={filters.search}
-              onChange={(event) => setFilters((current) => ({ ...current, search: event.target.value }))}
-              placeholder="Permit, address, county, contractor..."
+              list="dashboard-county-options"
+              placeholder="County"
+              value={filters.county === 'all' ? '' : filters.county}
+              onChange={(e) => setFilters((current) => ({ ...current, county: e.target.value || 'all' }))}
             />
+            <datalist id="dashboard-county-options">
+              {filterOptions.counties.map((c) => <option key={c} value={c} />)}
+            </datalist>
           </label>
           <label>
             Status
@@ -289,17 +313,6 @@ function App() {
               {filterOptions.statuses.map((status) => (
                 <option key={status} value={status}>
                   {statusLabel(status)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            County
-            <select value={filters.county} onChange={(event) => setFilters((current) => ({ ...current, county: event.target.value }))}>
-              <option value="all">All counties</option>
-              {filterOptions.counties.map((county) => (
-                <option key={county} value={county}>
-                  {county}
                 </option>
               ))}
             </select>
@@ -354,6 +367,13 @@ function App() {
                 url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
               />
               <FitBounds points={coordinates} />
+              {countyFeature && (
+                <GeoJSONLayer
+                  key={countyFeature.properties?.NAME}
+                  data={countyFeature}
+                  style={{ color: '#0a1f6e', fillOpacity: 0.08, weight: 3, dashArray: '6 4' }}
+                />
+              )}
               {coordinates.map((permit) => {
                 const tone = getStatusTone(permit.status);
                 const opacity = selectedPermit?.id === permit.id ? 0.95 : 0.7;
@@ -587,33 +607,31 @@ function App() {
             <div className="pred-form">
               <label className="pred-label">
                 County
-                <select value={predInput.county} onChange={(e) => setPredInput((p) => ({ ...p, county: e.target.value }))}>
-                  <option value="">Select county…</option>
+                <input
+                  list="county-options"
+                  placeholder="County"
+                  value={predInput.county}
+                  onChange={(e) => setPredInput((p) => ({ ...p, county: e.target.value }))}
+                />
+                <datalist id="county-options">
                   {filterOptions.counties.map((c) => (
-                    <option key={c} value={c}>{c}</option>
+                    <option key={c} value={c} />
                   ))}
-                </select>
-              </label>
-              <label className="pred-label">
-                Permit subtype — optional
-                <select value={predInput.subtype ?? ''} onChange={(e) => setPredInput((p) => ({ ...p, subtype: e.target.value }))}>
-                  <option value="">Any subtype…</option>
-                  {subtypes.map((s) => <option key={s} value={s}>{s}</option>)}
-                </select>
+                </datalist>
               </label>
               <label className="pred-label">
                 Jurisdiction — optional
-                <select value={predInput.jurisdiction ?? ''} onChange={(e) => setPredInput((p) => ({ ...p, jurisdiction: e.target.value }))}>
-                  <option value="">Any jurisdiction…</option>
-                  {jurisdictions.map((j) => <option key={j} value={j}>{j}</option>)}
-                </select>
-              </label>
-              <label className="pred-label">
-                State — optional
-                <select value={predInput.state ?? ''} onChange={(e) => setPredInput((p) => ({ ...p, state: e.target.value }))}>
-                  <option value="">Any state…</option>
-                  {states.map((s) => <option key={s} value={s}>{s}</option>)}
-                </select>
+                <input
+                  list="jurisdiction-options"
+                  placeholder="Search jurisdiction…"
+                  value={predInput.jurisdiction ?? ''}
+                  onChange={(e) => setPredInput((p) => ({ ...p, jurisdiction: e.target.value }))}
+                />
+                <datalist id="jurisdiction-options">
+                  {jurisdictions.map((j) => (
+                    <option key={j} value={j} />
+                  ))}
+                </datalist>
               </label>
               <label className="pred-label">
                 Permit type

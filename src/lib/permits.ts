@@ -72,6 +72,59 @@ export const loadRowsFromUrl = async (url: string): Promise<CsvRow[]> => {
 export const loadRowsFromFile = async (file: File): Promise<CsvRow[]> =>
   parseCsvText(await file.text());
 
+export const parseExternalRecords = (rows: CsvRow[], titanCityIndex: Map<string, number> = new Map()): PermitRecord[] =>
+  rows
+    .map((row, index) => {
+      const applyDate = row.apply_date ? new Date(row.apply_date) : null;
+      const issueDate = row.issue_date ? new Date(row.issue_date) : null;
+
+      let totalDuration: number | null = null;
+      if (applyDate && issueDate && isFinite(applyDate.getTime()) && isFinite(issueDate.getTime())) {
+        const days = (issueDate.getTime() - applyDate.getTime()) / (1000 * 60 * 60 * 24);
+        if (days > 0 && days < 3000) totalDuration = Math.round(days);
+      }
+
+      const city = (row.city ?? '').trim() || 'Unknown city';
+      const county = 'Unknown county';
+      const state = (row.state ?? '').trim() || 'CA';
+      const subtype = (row.permit_type ?? '').trim() || 'Solar';
+
+      return {
+        raw: row,
+        id: row.id || `ext-${index}`,
+        businessName: (row.company_name ?? '').trim(),
+        permitNumber: (row.permit_id ?? '').trim(),
+        status: 'final',
+        type: 'Solar',
+        subtype,
+        description: subtype,
+        county,
+        city,
+        jurisdiction: city,
+        state,
+        lat: row.latitude ? parseFloat(row.latitude) : null,
+        lng: row.longitude ? parseFloat(row.longitude) : null,
+        issueDate,
+        startDate: applyDate,
+        endDate: issueDate,
+        finalDate: issueDate,
+        totalDuration,
+        approvalDuration: totalDuration,
+        constructionDuration: null,
+        fees: null,
+        jobValue: null,
+        inspectionPassRate: null,
+        inspectionPassed: null,
+        propertyType: 'Unknown',
+        propertyTypeDetail: 'Unknown',
+        yearBuilt: null,
+        lotSize: null,
+        buildingArea: null,
+        titanCityInstalls: titanCityIndex.get(city.toLowerCase()) ?? 0,
+      };
+    })
+    .filter(r => r.totalDuration !== null) as PermitRecord[];
+
 export const buildTitanCityIndex = (titanRows: CsvRow[]): Map<string, number> => {
   const counts = new Map<string, number>();
   for (const row of titanRows) {

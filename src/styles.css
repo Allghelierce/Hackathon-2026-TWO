@@ -331,6 +331,10 @@ button:focus-visible {
   gap: 14px;
 }
 
+.filter-group--3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .filter-group label {
   display: grid;
   gap: 8px;
