@@ -1,14 +1,14 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import L from 'leaflet';
-import { CircleAlert, MapPinned, Sparkles, Upload, Waves } from 'lucide-react';
+import { CircleAlert, MapPinned, Sparkles, TrendingUp, Waves } from 'lucide-react';
+import { featureImportances, predict, trainModel, type PredictionInput } from './lib/prediction';
 import { CircleMarker, MapContainer, Popup, TileLayer, useMap } from 'react-leaflet';
 import {
   Area,
   AreaChart,
   Bar,
   BarChart,
-  Cell,
   Pie,
   PieChart,
   ResponsiveContainer,
@@ -20,11 +20,9 @@ import {
   applyPermitFilters,
   buildMetrics,
   countyPerformance,
-  formatCompactNumber,
   formatCurrency,
   formatNumber,
   getStatusTone,
-  loadRowsFromFile,
   loadRowsFromUrl,
   statusBreakdown,
   topInsight,
@@ -37,6 +35,17 @@ import {
 } from './lib/permits';
 
 const DEFAULT_DATA_URL = '/data/solar-city-permits.csv';
+
+const PERMIT_TYPE_OPTIONS: Array<{ label: string; rawType: string }> = [
+  { label: 'Solar Panels / PV', rawType: 'Solar panels' },
+  { label: 'Building / Construction', rawType: 'Building' },
+  { label: 'Electrical', rawType: 'Electrical' },
+  { label: 'Mechanical / HVAC', rawType: 'Mechanical' },
+  { label: 'Alternate Energy', rawType: 'Alternate energy' },
+  { label: 'Photovoltaic', rawType: 'Photovoltaic' },
+  { label: 'Multi-trade (MEP)', rawType: 'Mep' },
+  { label: 'Miscellaneous', rawType: 'Miscellaneous' },
+];
 
 const statusColors: Record<string, string> = {
   final: '#58d68d',
@@ -99,8 +108,6 @@ function ChartCard({ title, subtitle, children }: { title: string; subtitle: str
 
 function App() {
   const [records, setRecords] = useState<PermitRecord[]>([]);
-  const [sourceName, setSourceName] = useState('Solar City permit extract');
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filters, setFilters] = useState<PermitFilters>({
     search: '',
@@ -109,6 +116,14 @@ function App() {
     type: 'all',
   });
   const [selectedPermitId, setSelectedPermitId] = useState<string | null>(null);
+  const [predInput, setPredInput] = useState<PredictionInput>({
+    county: '',
+    type: '',
+    propertyType: '',
+    jobValue: null,
+    fees: null,
+  });
+  const predInitialized = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -129,9 +144,7 @@ function App() {
         }
         setError(failure instanceof Error ? failure.message : 'Unable to load the default permit data.');
       } finally {
-        if (active) {
-          setLoading(false);
-        }
+        // load complete
       }
     };
 
@@ -170,35 +183,39 @@ function App() {
 
   const metrics = useMemo(() => buildMetrics(filteredRecords), [filteredRecords]);
   const trend = useMemo(() => trendByMonth(filteredRecords), [filteredRecords]);
-  const statusData = useMemo(() => statusBreakdown(filteredRecords), [filteredRecords]);
+  const statusData = useMemo(
+    () => statusBreakdown(filteredRecords).map((entry) => ({
+      ...entry,
+      fill: statusColors[entry.status] ?? statusColors.unknown,
+    })),
+    [filteredRecords],
+  );
   const typeData = useMemo(() => typeBreakdown(filteredRecords), [filteredRecords]);
   const countyData = useMemo(() => countyPerformance(filteredRecords), [filteredRecords]);
   const insight = useMemo(() => topInsight(filteredRecords), [filteredRecords]);
 
+  const model = useMemo(() => trainModel(records), [records]);
+  const propertyTypes = useMemo(() => uniqueValues(records, 'propertyType'), [records]);
+  const predResult = useMemo(() => {
+    if (!model || !predInput.county || !predInput.type) return null;
+    return predict(model, predInput);
+  }, [model, predInput]);
+  const importances = useMemo(() => (model ? featureImportances(model) : []), [model]);
+
+  useEffect(() => {
+    if (!predInitialized.current && filterOptions.counties.length) {
+      predInitialized.current = true;
+      setPredInput({
+        county: filterOptions.counties[0] ?? '',
+        type: PERMIT_TYPE_OPTIONS[0].rawType,
+        propertyType: propertyTypes[0] ?? '',
+        jobValue: null,
+        fees: null,
+      });
+    }
+  }, [filterOptions.counties, filterOptions.types, propertyTypes]);
+
   const coordinates = filteredRecords.filter((record) => record.lat != null && record.lng != null);
-
-  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) {
-      return;
-    }
-
-    setLoading(true);
-    setError(null);
-    setSourceName(file.name);
-
-    try {
-      const rows = await loadRowsFromFile(file);
-      const nextRecords = toPermitRecords(rows);
-      setRecords(nextRecords);
-      setSelectedPermitId(nextRecords[0]?.id ?? null);
-    } catch (failure) {
-      setError(failure instanceof Error ? failure.message : 'Unable to parse the uploaded CSV file.');
-    } finally {
-      setLoading(false);
-      event.target.value = '';
-    }
-  };
 
   const kpiCopy = [
     {
@@ -229,17 +246,9 @@ function App() {
           <div className="eyebrow">Solar permit intelligence</div>
           <h1>Solar City Permit Pulse</h1>
           <p className="hero-text">
-            A geospatial BI dashboard for understanding where solar permits are moving quickly, where they are getting stuck,
+            A geospatial BI dashboard in California for understanding where solar permits are moving quickly, where they are getting stuck,
             and how the citywide rollout is changing over time.
           </p>
-          <div className="hero-actions">
-            <label className="upload-button">
-              <Upload size={16} />
-              Upload CSV
-              <input type="file" accept=".csv,text/csv" onChange={handleFileUpload} />
-            </label>
-            <div className="source-pill">{sourceName}</div>
-          </div>
         </div>
 
         <div className="hero-panel">
@@ -261,20 +270,7 @@ function App() {
         </div>
       </motion.header>
 
-      {error ? (
-        <div className="glass-panel error-panel">
-          <strong>Data load issue</strong>
-          <p>{error}</p>
-        </div>
-      ) : null}
-
-      <section className="metrics-grid">
-        {metrics.map((metric) => (
-          <MetricCard key={metric.label} {...metric} />
-        ))}
-      </section>
-
-      <section className="controls-row glass-panel">
+      <section className="controls-row glass-panel controls-row--top">
         <div className="filter-group">
           <label>
             Search
@@ -329,7 +325,7 @@ function App() {
         <motion.section className="glass-panel map-panel" initial="hidden" animate="visible" variants={viewTransition} transition={{ duration: 0.35 }}>
           <div className="section-heading">
             <div>
-              <h3>Geospatial overview</h3>
+              <h3>Geographic overview</h3>
               <p>Point intensity scales with total duration. Colors reflect current permit status.</p>
             </div>
             <div className="legend-row">
@@ -343,7 +339,15 @@ function App() {
           </div>
 
           <div className="map-shell">
-            <MapContainer center={[37.7, -121.9]} zoom={8} scrollWheelZoom className="permit-map">
+            <MapContainer
+              center={[37.7, -121.9]}
+              zoom={8}
+              minZoom={6}
+              maxBounds={[[32.5, -124.5], [42.1, -114.0]]}
+              maxBoundsViscosity={1.0}
+              scrollWheelZoom
+              className="permit-map"
+            >
               <TileLayer
                 attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
                 url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
@@ -431,30 +435,20 @@ function App() {
           ) : (
             <div className="empty-state">No permit matches the current filters.</div>
           )}
-          <div className="mini-table">
-            <div className="mini-table-header">
-              <span>Top permits by duration</span>
-              <span>{formatNumber.format(filteredRecords.length)} rows</span>
-            </div>
-            <div className="mini-table-body">
-              {filteredRecords
-                .slice()
-                .sort((left, right) => (right.totalDuration ?? 0) - (left.totalDuration ?? 0))
-                .slice(0, 5)
-                .map((permit) => (
-                  <button key={permit.id} className="table-row" onClick={() => setSelectedPermitId(permit.id)} type="button">
-                    <span>
-                      <strong>{permit.permitNumber || permit.id}</strong>
-                      <small>
-                        {permit.city}, {permit.county}
-                      </small>
-                    </span>
-                    <span>{permit.totalDuration == null ? 'n/a' : `${Math.round(permit.totalDuration)}d`}</span>
-                  </button>
-                ))}
-            </div>
-          </div>
         </aside>
+      </section>
+
+      {error ? (
+        <div className="glass-panel error-panel">
+          <strong>Data load issue</strong>
+          <p>{error}</p>
+        </div>
+      ) : null}
+
+      <section className="metrics-grid">
+        {metrics.map((metric) => (
+          <MetricCard key={metric.label} {...metric} />
+        ))}
       </section>
 
       <section className="chart-grid">
@@ -485,11 +479,7 @@ function App() {
         <ChartCard title="Status mix" subtitle="How the filtered permits distribute across lifecycle states.">
           <ResponsiveContainer width="100%" height={260}>
             <PieChart>
-              <Pie data={statusData} dataKey="permits" nameKey="status" cx="50%" cy="50%" outerRadius={86} innerRadius={56}>
-                {statusData.map((entry) => (
-                  <Cell key={entry.status} fill={statusColors[entry.status] ?? statusColors.unknown} />
-                ))}
-              </Pie>
+              <Pie data={statusData} dataKey="permits" nameKey="status" cx="50%" cy="50%" outerRadius={86} innerRadius={56} />
               <RechartsTooltip
                 contentStyle={{
                   background: 'rgba(6, 15, 31, 0.96)',
@@ -523,6 +513,10 @@ function App() {
 
       <section className="chart-grid lower-grid">
         <ChartCard title="County benchmark" subtitle="Where the workload is concentrated and how quickly counties are moving.">
+          <div className="county-legend">
+            <span className="county-legend-item county-legend-duration">Avg duration (days)</span>
+            <span className="county-legend-item county-legend-pass-rate">Inspection pass rate</span>
+          </div>
           <div className="county-list">
             {countyData.map((county) => (
               <div key={county.county} className="county-row">
@@ -530,15 +524,15 @@ function App() {
                   <strong>{county.county}</strong>
                   <span>{formatNumber.format(county.permits)} permits</span>
                 </div>
-                <div className="county-measure">
-                  <span className="county-measure-label blue">Cycle time</span>
-                  <div className="county-measure-line blue" />
-                  <span className="county-measure-value">{Math.round(county.averageDuration)}d</span>
-                </div>
-                <div className="county-measure">
-                  <span className="county-measure-label green">Pass rate</span>
-                  <div className="county-measure-line green" />
-                  <span className="county-measure-value">{Math.round(county.passRate * 100)}%</span>
+                <div className="county-bars">
+                  <div className="county-bar-row">
+                    <div className="county-bar duration" style={{ width: `${Math.min(100, county.averageDuration * 1.2)}%` }} />
+                    <span className="county-bar-label">{Math.round(county.averageDuration)} days</span>
+                  </div>
+                  <div className="county-bar-row">
+                    <div className="county-bar pass-rate" style={{ width: `${Math.min(100, county.passRate * 100)}%` }} />
+                    <span className="county-bar-label">{Math.round(county.passRate * 100)}% pass</span>
+                  </div>
                 </div>
               </div>
             ))}
@@ -562,6 +556,119 @@ function App() {
           </div>
         </ChartCard>
       </section>
+      {model && (
+        <section className="glass-panel prediction-section">
+          <div className="section-heading">
+            <div>
+              <h3 className="pred-heading">
+                <TrendingUp size={18} className="pred-heading-icon" />
+                Approval Time Predictor
+              </h3>
+              <p>
+                Linear regression trained on {model.trainingSamples.toLocaleString()} historical permits — select
+                inputs to estimate total duration.
+              </p>
+            </div>
+            <div className="pred-badge-row">
+              <span className="pred-badge">R² {model.r2.toFixed(2)}</span>
+              <span className="pred-badge">±{Math.round(model.rmse)} day RMSE</span>
+              <span className="pred-badge">{model.trainingSamples.toLocaleString()} train samples</span>
+            </div>
+          </div>
+
+          <div className="prediction-grid">
+            <div className="pred-form">
+              <label className="pred-label">
+                County
+                <select value={predInput.county} onChange={(e) => setPredInput((p) => ({ ...p, county: e.target.value }))}>
+                  <option value="">Select county…</option>
+                  {filterOptions.counties.map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="pred-label">
+                Permit type
+                <select value={predInput.type} onChange={(e) => setPredInput((p) => ({ ...p, type: e.target.value }))}>
+                  <option value="">Select type…</option>
+                  {PERMIT_TYPE_OPTIONS.map(({ label, rawType }) => (
+                    <option key={rawType} value={rawType}>{label}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="pred-label">
+                Property type
+                <select value={predInput.propertyType} onChange={(e) => setPredInput((p) => ({ ...p, propertyType: e.target.value }))}>
+                  <option value="">Select property type…</option>
+                  {propertyTypes.map((pt) => (
+                    <option key={pt} value={pt}>{pt}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="pred-label">
+                Job value — optional
+                <input
+                  type="number"
+                  placeholder="e.g. 25000"
+                  value={predInput.jobValue ?? ''}
+                  onChange={(e) => setPredInput((p) => ({ ...p, jobValue: e.target.value ? Number(e.target.value) : null }))}
+                />
+              </label>
+              <label className="pred-label">
+                Permit fees — optional
+                <input
+                  type="number"
+                  placeholder="e.g. 500"
+                  value={predInput.fees ?? ''}
+                  onChange={(e) => setPredInput((p) => ({ ...p, fees: e.target.value ? Number(e.target.value) : null }))}
+                />
+              </label>
+            </div>
+
+            <div className="pred-result">
+              {predResult ? (
+                <>
+                  <div className="pred-output">
+                    <div className="pred-label-sm">Estimated approval duration</div>
+                    <div
+                      className="pred-days"
+                      style={{
+                        color:
+                          predResult.predictedDays < 30
+                            ? 'var(--good)'
+                            : predResult.predictedDays < 60
+                              ? 'var(--warn)'
+                              : 'var(--bad)',
+                      }}
+                    >
+                      {predResult.predictedDays}
+                      <span className="pred-unit">days</span>
+                    </div>
+                    <div className="pred-range">
+                      {predResult.lowerBound}–{predResult.upperBound} day confidence range
+                    </div>
+                  </div>
+
+                  <div className="pred-importance">
+                    <div className="pred-label-sm pred-importance-heading">Feature influence</div>
+                    {importances.map((imp) => (
+                      <div key={imp.name} className="imp-row">
+                        <div className="imp-name">{imp.name}</div>
+                        <div className="imp-bar-bg">
+                          <div className="imp-bar-fill" style={{ width: `${Math.round(imp.pct * 100)}%` }} />
+                        </div>
+                        <div className="imp-pct">{Math.round(imp.pct * 100)}%</div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="pred-empty">Select county and permit type to generate a prediction.</div>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
     </div>
   );
 }
