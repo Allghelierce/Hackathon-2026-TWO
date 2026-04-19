@@ -530,13 +530,15 @@ function App() {
                   <strong>{county.county}</strong>
                   <span>{formatNumber.format(county.permits)} permits</span>
                 </div>
-                <div className="county-bars">
-                  <div className="county-bar duration" style={{ width: `${Math.min(100, county.averageDuration * 1.2)}%` }} />
-                  <div className="county-bar passrate" style={{ width: `${Math.min(100, county.passRate * 100)}%` }} />
+                <div className="county-measure">
+                  <span className="county-measure-label blue">Cycle time</span>
+                  <div className="county-measure-line blue" />
+                  <span className="county-measure-value">{Math.round(county.averageDuration)}d</span>
                 </div>
-                <div className="county-kpis">
-                  <span>{Math.round(county.averageDuration)}d</span>
-                  <span>{Math.round(county.passRate * 100)}%</span>
+                <div className="county-measure">
+                  <span className="county-measure-label green">Pass rate</span>
+                  <div className="county-measure-line green" />
+                  <span className="county-measure-value">{Math.round(county.passRate * 100)}%</span>
                 </div>
               </div>
             ))}
