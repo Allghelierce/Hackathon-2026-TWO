@@ -33,6 +33,7 @@ export interface PermitRecord {
   yearBuilt: number | null;
   lotSize: number | null;
   buildingArea: number | null;
+  titanCityInstalls: number;
 }
 
 export interface PermitFilters {
@@ -71,10 +72,20 @@ export const loadRowsFromUrl = async (url: string): Promise<CsvRow[]> => {
 export const loadRowsFromFile = async (file: File): Promise<CsvRow[]> =>
   parseCsvText(await file.text());
 
-export const toPermitRecords = (rows: CsvRow[]): PermitRecord[] =>
+export const buildTitanCityIndex = (titanRows: CsvRow[]): Map<string, number> => {
+  const counts = new Map<string, number>();
+  for (const row of titanRows) {
+    const city = text(row, 'CITY').toLowerCase();
+    if (city) counts.set(city, (counts.get(city) ?? 0) + 1);
+  }
+  return counts;
+};
+
+export const toPermitRecords = (rows: CsvRow[], titanCityIndex: Map<string, number> = new Map()): PermitRecord[] =>
   rows.map((row, index) => {
     const permitNumber = text(row, 'PERMIT_NUMBER');
     const id = text(row, 'ID') || permitNumber || `permit-${index + 1}`;
+    const city = text(row, 'CITY') || 'Unknown city';
     return {
       raw: row,
       id,
@@ -85,7 +96,7 @@ export const toPermitRecords = (rows: CsvRow[]): PermitRecord[] =>
       subtype: text(row, 'SUBTYPE') || 'Unspecified',
       description: text(row, 'DESCRIPTION') || 'No description available',
       county: text(row, 'COUNTY') || 'Unknown county',
-      city: text(row, 'CITY') || 'Unknown city',
+      city,
       jurisdiction: text(row, 'JURISDICTION') || 'Unknown jurisdiction',
       state: text(row, 'STATE') || 'CA',
       lat: number(row, 'LAT'),
@@ -106,6 +117,7 @@ export const toPermitRecords = (rows: CsvRow[]): PermitRecord[] =>
       yearBuilt: number(row, 'PROPERTY_YEAR_BUILT'),
       lotSize: number(row, 'PROPERTY_LOT_SIZE'),
       buildingArea: number(row, 'PROPERTY_BUILDING_AREA'),
+      titanCityInstalls: titanCityIndex.get(city.toLowerCase()) ?? 0,
     };
   });
 
@@ -300,6 +312,24 @@ export const typeBreakdown = (records: PermitRecord[]) => {
       averageDuration: bucket.permits ? bucket.totalDuration / bucket.permits : 0,
     }))
     .sort((left, right) => right.permits - left.permits)
+    .slice(0, 8);
+};
+
+export const titanCityPerformance = (records: PermitRecord[]) => {
+  const seen = new Map<string, { titanInstalls: number; durations: number[] }>();
+  for (const r of records) {
+    if (r.titanCityInstalls <= 0) continue;
+    const entry = seen.get(r.city) ?? { titanInstalls: r.titanCityInstalls, durations: [] };
+    if (r.totalDuration !== null && r.totalDuration > 0) entry.durations.push(r.totalDuration);
+    seen.set(r.city, entry);
+  }
+  return Array.from(seen.entries())
+    .map(([city, { titanInstalls, durations }]) => ({
+      city,
+      titanInstalls,
+      avgDuration: durations.length ? Math.round(durations.reduce((s, v) => s + v, 0) / durations.length) : null,
+    }))
+    .sort((a, b) => b.titanInstalls - a.titanInstalls)
     .slice(0, 8);
 };
 

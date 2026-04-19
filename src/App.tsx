@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import L from 'leaflet';
 import { CircleAlert, MapPinned, Sparkles, TrendingUp, Waves } from 'lucide-react';
@@ -9,6 +9,8 @@ import {
   AreaChart,
   Bar,
   BarChart,
+  ComposedChart,
+  Line,
   Pie,
   PieChart,
   ResponsiveContainer,
@@ -19,12 +21,14 @@ import {
 import {
   applyPermitFilters,
   buildMetrics,
+  buildTitanCityIndex,
   countyPerformance,
   formatCurrency,
   formatNumber,
   getStatusTone,
   loadRowsFromUrl,
   statusBreakdown,
+  titanCityPerformance,
   topInsight,
   toPermitRecords,
   trendByMonth,
@@ -35,6 +39,7 @@ import {
 } from './lib/permits';
 
 const DEFAULT_DATA_URL = '/data/solar-city-permits.csv';
+const TITAN_DATA_URL = '/data/titan-addresses.csv';
 
 const PERMIT_TYPE_OPTIONS: Array<{ label: string; rawType: string }> = [
   { label: 'Solar Panels / PV', rawType: 'Solar panels' },
@@ -122,16 +127,22 @@ function App() {
     propertyType: '',
     jobValue: null,
     fees: null,
+    subtype: '',
+    jurisdiction: '',
+    state: '',
   });
-  const predInitialized = useRef(false);
 
   useEffect(() => {
     let active = true;
 
     const bootstrap = async () => {
       try {
-        const rows = await loadRowsFromUrl(DEFAULT_DATA_URL);
-        const nextRecords = toPermitRecords(rows);
+        const [permitRows, titanRows] = await Promise.all([
+          loadRowsFromUrl(DEFAULT_DATA_URL),
+          loadRowsFromUrl(TITAN_DATA_URL).catch(() => []),
+        ]);
+        const titanCityIndex = buildTitanCityIndex(titanRows);
+        const nextRecords = toPermitRecords(permitRows, titanCityIndex);
         if (!active) {
           return;
         }
@@ -143,8 +154,6 @@ function App() {
           return;
         }
         setError(failure instanceof Error ? failure.message : 'Unable to load the default permit data.');
-      } finally {
-        // load complete
       }
     };
 
@@ -196,24 +205,16 @@ function App() {
 
   const model = useMemo(() => trainModel(records), [records]);
   const propertyTypes = useMemo(() => uniqueValues(records, 'propertyType'), [records]);
+  const subtypes = useMemo(() => uniqueValues(records, 'subtype'), [records]);
+  const jurisdictions = useMemo(() => uniqueValues(records, 'jurisdiction'), [records]);
+  const states = useMemo(() => uniqueValues(records, 'state'), [records]);
   const predResult = useMemo(() => {
     if (!model || !predInput.county || !predInput.type) return null;
     return predict(model, predInput);
   }, [model, predInput]);
   const importances = useMemo(() => (model ? featureImportances(model) : []), [model]);
+  const titanCityData = useMemo(() => titanCityPerformance(records), [records]);
 
-  useEffect(() => {
-    if (!predInitialized.current && filterOptions.counties.length) {
-      predInitialized.current = true;
-      setPredInput({
-        county: filterOptions.counties[0] ?? '',
-        type: PERMIT_TYPE_OPTIONS[0].rawType,
-        propertyType: propertyTypes[0] ?? '',
-        jobValue: null,
-        fees: null,
-      });
-    }
-  }, [filterOptions.counties, filterOptions.types, propertyTypes]);
 
   const coordinates = filteredRecords.filter((record) => record.lat != null && record.lng != null);
 
@@ -513,10 +514,6 @@ function App() {
 
       <section className="chart-grid lower-grid">
         <ChartCard title="County benchmark" subtitle="Where the workload is concentrated and how quickly counties are moving.">
-          <div className="county-legend">
-            <span className="county-legend-item county-legend-duration">Avg duration (days)</span>
-            <span className="county-legend-item county-legend-pass-rate">Inspection pass rate</span>
-          </div>
           <div className="county-list">
             {countyData.map((county) => (
               <div key={county.county} className="county-row">
@@ -524,36 +521,46 @@ function App() {
                   <strong>{county.county}</strong>
                   <span>{formatNumber.format(county.permits)} permits</span>
                 </div>
-                <div className="county-bars">
-                  <div className="county-bar-row">
-                    <div className="county-bar duration" style={{ width: `${Math.min(100, county.averageDuration * 1.2)}%` }} />
-                    <span className="county-bar-label">{Math.round(county.averageDuration)} days</span>
+                <div className="county-measure">
+                  <span className="county-measure-label blue">Cycle time</span>
+                  <div className="county-measure-line blue">
+                    <div className="county-measure-fill" style={{ width: `${Math.min(100, county.averageDuration * 1.2)}%` }} />
                   </div>
-                  <div className="county-bar-row">
-                    <div className="county-bar pass-rate" style={{ width: `${Math.min(100, county.passRate * 100)}%` }} />
-                    <span className="county-bar-label">{Math.round(county.passRate * 100)}% pass</span>
+                  <span className="county-measure-value">{Math.round(county.averageDuration)}d</span>
+                </div>
+                <div className="county-measure">
+                  <span className="county-measure-label green">Pass rate</span>
+                  <div className="county-measure-line green">
+                    <div className="county-measure-fill" style={{ width: `${Math.min(100, county.passRate * 100)}%` }} />
                   </div>
+                  <span className="county-measure-value">{Math.round(county.passRate * 100)}%</span>
                 </div>
               </div>
             ))}
           </div>
         </ChartCard>
 
-        <ChartCard title="Project brief" subtitle="Why stakeholders will use this beyond a CSV review.">
-          <div className="brief-grid">
-            <div className="brief-card">
-              <h4>Operational lens</h4>
-              <p>Filter by geography, status, and permit type to see where backlog, velocity, and execution diverge.</p>
-            </div>
-            <div className="brief-card">
-              <h4>Stakeholder-ready</h4>
-              <p>A map-first interface with digestible KPIs and drilldown cards for executive review or field ops.</p>
-            </div>
-            <div className="brief-card">
-              <h4>Data flexible</h4>
-              <p>Upload alternate permit extracts without changing the app, which keeps the workflow useful for demos and future data drops.</p>
-            </div>
-          </div>
+        <ChartCard
+          title="Titan Solar city presence"
+          subtitle="Top cities by Titan installations — bars show install count, line shows avg permit duration for matched cities."
+        >
+          {titanCityData.length > 0 ? (
+            <ResponsiveContainer width="100%" height={260}>
+              <ComposedChart data={titanCityData} margin={{ top: 10, right: 28, left: 0, bottom: 0 }}>
+                <XAxis dataKey="city" tick={{ fill: '#c6d1ff', fontSize: 11 }} axisLine={false} tickLine={false} angle={-18} textAnchor="end" height={58} />
+                <YAxis yAxisId="installs" tick={{ fill: '#c6d1ff', fontSize: 12 }} axisLine={false} tickLine={false} />
+                <YAxis yAxisId="duration" orientation="right" tick={{ fill: '#f5c242', fontSize: 12 }} axisLine={false} tickLine={false} unit="d" />
+                <RechartsTooltip
+                  contentStyle={{ background: 'rgba(6,15,31,0.96)', border: '1px solid rgba(132,160,255,0.24)', borderRadius: '16px', color: '#f5f7ff' }}
+                  formatter={(value, name) => name === 'avgDuration' ? [`${value}d`, 'Avg duration'] : [value, 'Titan installs']}
+                />
+                <Bar yAxisId="installs" dataKey="titanInstalls" fill="#9a8cff" radius={[10, 10, 0, 0]} name="titanInstalls" />
+                <Line yAxisId="duration" type="monotone" dataKey="avgDuration" stroke="#f5c242" strokeWidth={2.5} dot={{ fill: '#f5c242', r: 4 }} name="avgDuration" connectNulls />
+              </ComposedChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="pred-empty">No city overlap found between Titan addresses and permit records.</div>
+          )}
         </ChartCard>
       </section>
       {model && (
@@ -570,9 +577,9 @@ function App() {
               </p>
             </div>
             <div className="pred-badge-row">
-              <span className="pred-badge">R² {model.r2.toFixed(2)}</span>
-              <span className="pred-badge">±{Math.round(model.rmse)} day RMSE</span>
-              <span className="pred-badge">{model.trainingSamples.toLocaleString()} train samples</span>
+              <span className="pred-badge" data-tooltip="How much of the variance in approval time the model explains. 0.70 means it explains 70% of the variation — above 0.5 is decent for noisy permit data.">R² {model.r2.toFixed(2)}</span>
+              <span className="pred-badge" data-tooltip="Average prediction error in days on held-out permits the model has never seen. Smaller is better.">±{Math.round(model.rmse)} day RMSE</span>
+              <span className="pred-badge" data-tooltip="Number of historical permits used to train the model. More samples means more reliable predictions.">{model.trainingSamples.toLocaleString()} train samples</span>
             </div>
           </div>
 
@@ -585,6 +592,27 @@ function App() {
                   {filterOptions.counties.map((c) => (
                     <option key={c} value={c}>{c}</option>
                   ))}
+                </select>
+              </label>
+              <label className="pred-label">
+                Permit subtype — optional
+                <select value={predInput.subtype ?? ''} onChange={(e) => setPredInput((p) => ({ ...p, subtype: e.target.value }))}>
+                  <option value="">Any subtype…</option>
+                  {subtypes.map((s) => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </label>
+              <label className="pred-label">
+                Jurisdiction — optional
+                <select value={predInput.jurisdiction ?? ''} onChange={(e) => setPredInput((p) => ({ ...p, jurisdiction: e.target.value }))}>
+                  <option value="">Any jurisdiction…</option>
+                  {jurisdictions.map((j) => <option key={j} value={j}>{j}</option>)}
+                </select>
+              </label>
+              <label className="pred-label">
+                State — optional
+                <select value={predInput.state ?? ''} onChange={(e) => setPredInput((p) => ({ ...p, state: e.target.value }))}>
+                  <option value="">Any state…</option>
+                  {states.map((s) => <option key={s} value={s}>{s}</option>)}
                 </select>
               </label>
               <label className="pred-label">
